@@ -51,7 +51,7 @@ def validate_excel_data(file_path):
                 errors.append(f"Invalid value '{row['Data']}' in 'Data' column in row {index + 2}")
 
     except Exception as e:
-        errors.append(f"Error processing Excel file in \"{kidsCountIndicatorExcelFile}\": {e}")
+        errors.append(f"Error processing Excel file in \"{file_path}\": {e}")
 
     return errors
 
@@ -69,33 +69,57 @@ def is_valid_excel_file(file_path) -> bool:
         pd.read_excel(file_path)
         return True
     except Exception as e:
-        print(f"Error reading Excel file in \"{kidsCountIndicatorExcelFile}\": {e}")
+        print(f"Error reading Excel file in \"{file_path}\": {e}")
         return False
 
-def get_location_of_kids_count_indicator_excel_file() -> str:
-    # Check if there is exactly one argument (excluding the script name)
-    if len(sys.argv) == 2:
-        kidsCountDataFile = sys.argv[1]
-    else:
-        # Ask the user for the file path if it's not provided as an argument
-        print("Please provide the full filepath to the KidsCountIndicator data file")
-        kidsCountDataFile = input()
-
-    # Validate the provided file path
-    if is_valid_excel_file(kidsCountDataFile):
-        return kidsCountDataFile
-    else:
-        print("Invalid Excel file. Press the enter key to exit")
+def get_data_files_in_folder(folder_path) -> list:
+    if not os.path.isdir(folder_path):
+        print(f"The folder {folder_path} does not exist.")
+        print("Press the enter key to exit")
         input()
         exit()
-    
-kidsCountIndicatorExcelFile = get_location_of_kids_count_indicator_excel_file()
 
-validation_errors = validate_excel_data(kidsCountIndicatorExcelFile)
-if validation_errors:
-    for error in validation_errors:
-        print(error)
+    excel_files = [
+        os.path.join(folder_path, f)
+        for f in sorted(os.listdir(folder_path))
+        if f.lower().endswith('.xlsx') and not f.startswith('~$')
+    ]
+
+    if not excel_files:
+        print(f"No .xlsx files found in {folder_path}.")
+        print("Press the enter key to exit")
+        input()
+        exit()
+
+    return excel_files
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+data_folder = os.path.join(script_dir, 'data')
+
+data_files = get_data_files_in_folder(data_folder)
+
+any_errors = False
+for kidsCountIndicatorExcelFile in data_files:
+    print(f"Checking \"{kidsCountIndicatorExcelFile}\"...")
+
+    if not is_valid_excel_file(kidsCountIndicatorExcelFile):
+        any_errors = True
+        print("")
+        continue
+
+    validation_errors = validate_excel_data(kidsCountIndicatorExcelFile)
+    if validation_errors:
+        any_errors = True
+        for error in validation_errors:
+            print(error)
+        print("")
+        print(f"Please resolve the errors above in \"{kidsCountIndicatorExcelFile}\".")
+    else:
+        print(f"No errors found in \"{kidsCountIndicatorExcelFile}\", congratulations!")
     print("")
-    print(f"Please resolve the errors above in \"{kidsCountIndicatorExcelFile}\".")
-else:
-    print(f"No errors found in \"{kidsCountIndicatorExcelFile}\", congratulations!")
+
+if not any_errors:
+    print("All files passed validation.")
+
+print("Press the enter key to exit")
+input()
