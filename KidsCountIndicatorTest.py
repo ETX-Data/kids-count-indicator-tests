@@ -1,9 +1,93 @@
 import os
+import re
 import sys
+from datetime import date
 import pandas as pd
 
 from locations_dict import locations_dict
 from valid_data_formats import valid_data_formats
+
+REQUIRED_COLUMNS = ['Location', 'LocationId', 'DataFormat', 'Data', 'TimeFrame']
+
+MIN_VALID_YEAR = 2010 # 2010 is arbitrary - move it earlier if we ever decide to upload more historical data
+MAX_VALID_YEAR = date.today().year
+
+
+#### 'TimeFrame' is most commonly a single year (e.g. 2026), but some education
+#### indicators report a school year range instead (e.g. '2017 - 2018').
+def is_valid_timeframe(value):
+    if isinstance(value, bool):
+        return False
+
+    if isinstance(value, (int, float)):
+        return float(value).is_integer() and MIN_VALID_YEAR <= value <= MAX_VALID_YEAR
+
+    if isinstance(value, str):
+        text = value.strip()
+
+        if re.fullmatch(r'\d{4}', text):
+            return MIN_VALID_YEAR <= int(text) <= MAX_VALID_YEAR
+
+        school_year_match = re.fullmatch(r'(\d{4})\s*-\s*(\d{4})', text)
+        if school_year_match:
+            start_year, end_year = int(school_year_match.group(1)), int(school_year_match.group(2))
+            return end_year == start_year + 1 and MIN_VALID_YEAR <= start_year <= MAX_VALID_YEAR
+
+    return False
+
+
+#### some indicators include an extra breakdown column (e.g. RaceEthnicity, Sex, AgeGroup) that other indicators don't have
+#### these columns aren't required, but when present, each category should be spelled/formatted consistently
+#### and should appear the same number of times as every other category (a multiple of the number of locations,
+#### since every location should get one row per category per time period)
+def validate_optional_categorical_columns(df):
+    errors = []
+    num_locations = len(locations_dict)
+
+    optional_columns = [col for col in df.columns if col not in REQUIRED_COLUMNS]
+
+    for col in optional_columns:
+        raw_values = [str(v) for v in df[col]]
+
+        # skip columns that are entirely blank - they just don't apply to this indicator
+        if all(v.strip() == '' for v in raw_values):
+            continue
+
+        # test: no case/whitespace variants of what should be the same category
+        # (e.g. 'Asian' and 'asian ' both present)
+        variants_by_normalized_value = {}
+        for value in raw_values:
+            normalized_value = value.strip().casefold()
+            variants_by_normalized_value.setdefault(normalized_value, set()).add(value)
+
+        for normalized_value, variants in variants_by_normalized_value.items():
+            if len(variants) > 1:
+                errors.append(
+                    f"Inconsistent formatting in '{col}' column: {sorted(variants)} appear to be the same "
+                    f"category but are spelled/formatted differently."
+                )
+
+        # test: every category occurs the same number of times, and that count is a
+        # multiple of the number of locations ({num_locations}, {num_locations*2}, ...)
+        counts_by_category = pd.Series(raw_values).value_counts()
+        distinct_counts = set(counts_by_category.values)
+
+        if len(distinct_counts) > 1:
+            counts_summary = ", ".join(f"'{category}': {count}" for category, count in counts_by_category.items())
+            errors.append(
+                f"Inconsistent number of occurrences per category in '{col}' column "
+                f"(every category should occur the same number of times): {counts_summary}"
+            )
+        else:
+            common_count = next(iter(distinct_counts))
+            if common_count % num_locations != 0:
+                errors.append(
+                    f"Each category in '{col}' column occurs {common_count} time(s), which is not a multiple "
+                    f"of {num_locations} (the number of locations) - expected {num_locations}, "
+                    f"{num_locations * 2}, {num_locations * 3}, etc."
+                )
+
+    return errors
 
 
 #### validate the data inside an excel file against the required rules
@@ -14,12 +98,12 @@ def validate_excel_data(file_path):
         # keep "NA" as literal text instead of pandas turning it into a blank cell
         df = pd.read_excel(file_path, keep_default_na=False, na_values=[])
 
-        required_column = ['Location', 'LocationId', 'DataFormat', 'Data']
-
         # test: all required columns are present
-        for col in required_column:
+        for col in REQUIRED_COLUMNS:
             if(col not in df.columns):
                 errors.append(f"Missing column header {col}")
+
+        errors.extend(validate_optional_categorical_columns(df))
 
        # iterate over DataFrame row by row
         for index, row in df.iterrows():
@@ -57,6 +141,10 @@ def validate_excel_data(file_path):
             # test: 'DataFormat' is one of the allowed formats
             if row['DataFormat'] not in valid_data_formats:
                 errors.append(f"Invalid data format '{row['DataFormat']}' in row {index + 2}")
+
+            # test: 'TimeFrame' is a plausible year (e.g. 2026) or school-year range (e.g. '2017 - 2018')
+            if not is_valid_timeframe(row['TimeFrame']):
+                errors.append(f"Invalid value '{row['TimeFrame']}' in 'TimeFrame' column in row {index + 2}")
 
     except Exception as e:
         errors.append(f"Error processing Excel file in \"{file_path}\": {e}")
