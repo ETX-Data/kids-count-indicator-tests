@@ -1,0 +1,1 @@
+valid_data_formats = {"Rate Per 100,000", "Number", "Percent"}
