@@ -160,15 +160,25 @@ def validate_optional_categorical_columns(df):
     return errors
 
 
-#### pull the "<number>_<Name>" indicator key out of a cleaned file name - it's always the first
-#### two underscore-separated segments after "CLEANED_", regardless of what comes after (a year,
-#### a breakdown column, both, in either order, or a Windows re-download suffix like " (1)"), e.g.
-#### "CLEANED_3.7_PretermBirths_2023_RaceEthnicity.xlsx" -> "3.7_PretermBirths"
-#### "CLEANED_1.2_ChildPopulation_RaceEthnicity_AsianDisaggregated_2023.xlsx" -> "1.2_ChildPopulation"
+#### pull the indicator key out of a cleaned file name: the "<number>_<Name>" prefix (always the
+#### first two underscore-separated segments after "CLEANED_"), plus any other segment that isn't
+#### a bare 4-digit year - the data year can appear before or after the breakdown segments, or be
+#### left out entirely, but every other segment (RaceEthnicity, AsianDisaggregated, etc.) is kept.
+#### This matters because files that share a "<number>_<Name>" prefix can still be fundamentally
+#### different data (e.g. no breakdown vs. RaceEthnicity vs. RaceEthnicity_AsianDisaggregated for
+#### the same indicator number) that needs to be checked against a different page on the site -
+#### collapsing them to the same key would compare a file's categories against the wrong page's
+#### categories (e.g. an "Other" bucket that means something different on each page). e.g.
+#### "CLEANED_3.7_PretermBirths_2023_RaceEthnicity.xlsx" -> "3.7_PretermBirths_RaceEthnicity"
+#### "CLEANED_1.2_ChildPopulation_RaceEthnicity_2024_AsianDisaggregated.xlsx" -> "1.2_ChildPopulation_RaceEthnicity_AsianDisaggregated"
+#### "CLEANED_1.2_ChildPopulation_2024.xlsx" -> "1.2_ChildPopulation"
 #### this key is what's looked up in reference_data_dict.py - returns None if the file name
 #### doesn't even have a "<number>_<Name>" prefix (the reference-data check is just skipped then)
 def get_indicator_key(file_path):
     file_name = os.path.splitext(os.path.basename(file_path))[0]
+    # strip a Windows re-download suffix like " (1)" before splitting into segments
+    file_name = re.sub(r'\s+\(\d+\)$', '', file_name)
+
     segments = file_name.split('_')
     if segments and segments[0].upper() == 'CLEANED':
         segments = segments[1:]
@@ -176,7 +186,12 @@ def get_indicator_key(file_path):
     if len(segments) < 2 or not re.fullmatch(r'\d+(\.\d+)?', segments[0]):
         return None
 
-    return f'{segments[0]}_{segments[1]}'
+    key_segments = [
+        segment for i, segment in enumerate(segments)
+        if i < 2 or not re.fullmatch(r'\d{4}', segment)
+    ]
+
+    return '_'.join(key_segments)
 
 
 #### the one breakdown column in a file, if any (e.g. 'RaceEthnicity', 'Age group') - everything
