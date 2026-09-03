@@ -1,3 +1,7 @@
+# Kids Count Indicator Test
+
+Checks Kids Count indicator `.xlsx` files for errors before they are uploaded to the Annie E. Casey Foundation's Kids Count Data Center.
+
 # Installation Instructions:
 To get this cloned down and to use it locally, just follow these instructions
 
