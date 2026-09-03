@@ -27,7 +27,10 @@ REQUIRED_COLUMNS = ['Location', 'LocationId', 'DataFormat', 'Data', 'TimeFrame']
 MIN_VALID_YEAR = 2010 # 2010 is arbitrary - move it earlier if we ever decide to upload more historical data
 MAX_VALID_YEAR = date.today().year
 
-# locations checked against the live site for the trend sanity check below
+# Bexar and Travis are checked (along with Texas) because they're populous enough that their
+# year-to-year numbers stay fairly stable - small counties can swing widely from natural
+# randomness alone, which would trigger false positives here.
+# can edit to add additional counties / change which counties you're looking at
 REFERENCE_CHECK_LOCATIONS = {'Texas', 'Bexar', 'Travis'}
 REFERENCE_CHECK_COUNTIES = ['Bexar', 'Travis'] # the non-Texas subset, passed to fetch_recent_series
 
