@@ -352,11 +352,21 @@ def get_data_files_in_folder(folder_path) -> list:
         input()
         exit()
 
+    all_files = [f for f in sorted(os.listdir(folder_path)) if not f.startswith('~$')]
+
     excel_files = [
         os.path.join(folder_path, f)
-        for f in sorted(os.listdir(folder_path))
-        if f.lower().endswith('.xlsx') and not f.startswith('~$')
+        for f in all_files
+        if f.lower().endswith('.xlsx')
     ]
+
+    skipped_files = [f for f in all_files if not f.lower().endswith('.xlsx')]
+    if skipped_files:
+        print(
+            f"WARNING: found {len(skipped_files)} file(s) in {folder_path} that are NOT .xlsx and will NOT "
+            f"be checked by this script: {skipped_files}"
+        )
+        print("")
 
     if not excel_files:
         print(f"No .xlsx files found in {folder_path}.")
