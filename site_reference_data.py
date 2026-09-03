@@ -1,4 +1,4 @@
-#### Fetches recent-year totals straight from an indicator's live page on the KIDS COUNT Data
+#### Fetches recent-period series straight from an indicator's live page on the KIDS COUNT Data
 #### Center (https://datacenter.aecf.org), so KidsCountIndicatorTest.py can compare a file's
 #### numbers against what's already published before it gets uploaded.
 ####
@@ -46,8 +46,15 @@ def _get(url, extra_headers=None):
         raise ReferenceDataUnavailable(f"Could not reach {url}: {e}") from e
 
 
-#### scrape the page's hidden form inputs to learn the indicator's internal ids:
-#### which numeric id means which year, which breakdown category, and which data format
+#### a category/format name as it'll be matched against a file's column values - trimmed and
+#### casefolded so differences like "Asian, Multiracial or Other Race" vs "...Or Other Race"
+#### (the site itself isn't always consistent) don't cause a real match to be missed
+def _normalize_name(name):
+    return name.strip().casefold() if name else None
+
+
+#### scrape the page's hidden form inputs to learn the indicator's internal ids: which numeric
+#### id means which year, which breakdown category (if any), and which data format
 def _get_indicator_page_config(page_url):
     html = _get(page_url)
 
@@ -70,18 +77,23 @@ def _get_indicator_page_config(page_url):
 
     # only present for indicators with a breakdown column (RaceEthnicity, Sex, etc.) - a plain
     # indicator with no breakdown will have no matches here, which is fine
-    category_ids = [match.group(1) for match in re.finditer(r'data-name="ch" name="dist" id="ch-chk-(\d+)"', html)]
+    category_name_by_id = {
+        match.group(1): match.group(2)
+        for match in re.finditer(r'data-name="ch" name="dist" id="ch-chk-(\d+)"[^>]*data-title="([^"]+)"', html)
+    }
 
-    format_id_by_label = {
-        match.group(2): match.group(1)
+    format_name_by_id = {
+        match.group(1): match.group(2)
         for match in re.finditer(r'name="fmt" class="form_toggle_input radchk" value="(\d+)" data-title="([^"]+)"', html)
     }
+    if not format_name_by_id:
+        raise ReferenceDataUnavailable(f"Couldn't find any data-format options on {page_url} - the site's page layout may have changed.")
 
     return {
         'indicator_id': indicator_match.group(1),
         'year_label_by_timeframe_id': year_label_by_timeframe_id,
-        'category_ids': category_ids,
-        'format_id_by_label': format_id_by_label,
+        'category_name_by_id': category_name_by_id,
+        'format_name_by_id': format_name_by_id,
     }
 
 
@@ -93,13 +105,13 @@ def _year_label_sort_key(label):
 
 
 #### call the same JSON API the site's own table view uses, and return its raw HTML table fragment
-def _fetch_data_table_html(page_url, indicator_id, location_ids, location_type, timeframe_ids, format_id, category_ids):
+def _fetch_data_table_html(page_url, indicator_id, location_ids, location_type, timeframe_ids, format_ids, category_ids):
     params = {
         'ind': indicator_id,
         'loc': ','.join(location_ids),
         'loct': location_type,
         'tf': ','.join(timeframe_ids),
-        'fmt': format_id,
+        'fmt': ','.join(format_ids),
         # the site always sends a comparison location even when not displaying one - omitting
         # cmploc/inccmploc entirely makes the API return an error
         'cmploc': TEXAS_LOCATION_ID,
@@ -117,59 +129,59 @@ def _fetch_data_table_html(page_url, indicator_id, location_ids, location_type, 
         raise ReferenceDataUnavailable(f"Unexpected response from {url}: {e}") from e
 
 
-#### add up each location's 'Number' value per year (or year-range, e.g. "2018 - 2022") across
-#### every row (i.e. across every breakdown category, if there is one) - the site doesn't
-#### publish a combined total, so this sum is what represents each location's overall total
-def _sum_totals_by_location_and_year(table_html, year_label_by_timeframe_id, number_format_id, location_name_by_id):
-    totals_by_location = {}
+#### parse the table into one series per (location, category, data format) - e.g.
+#### ('Texas', 'white', 'Number') -> {'2019': 50183, '2020': 45561, ...}. Each row in the site's
+#### table is already exactly one such series across years, so this doesn't aggregate anything -
+#### it's a direct, apples-to-apples read of what the site publishes for that exact combination
+#### (category is None for indicators with no breakdown column, and normalized via
+#### _normalize_name so it can be matched against a file's category text later)
+def _parse_series_by_key(table_html, year_label_by_timeframe_id, category_name_by_id, format_name_by_id, location_name_by_id):
+    series_by_key = {}
 
     row_pattern = re.compile(
-        r'<tr class="[^"]*" data-locId="(\d+)"(?:\s+data-chId="\d+")?\s+data-fmtId="(\d+)">(.*?)</tr>',
+        r'<tr class="[^"]*" data-locId="(\d+)"(?:\s+data-chId="(\d+)")?\s+data-fmtId="(\d+)">(.*?)</tr>',
         re.DOTALL,
     )
     cell_pattern = re.compile(r'class="data_value[^"]*\btf-(\d+)\b[^"]*"><div[^>]*>([^<]*)</div>')
 
-    for location_id, format_id, row_html in row_pattern.findall(table_html):
-        if format_id != number_format_id:
-            continue
-
+    for location_id, category_id, format_id, row_html in row_pattern.findall(table_html):
         location_name = location_name_by_id.get(location_id)
         if location_name is None:
             continue
+
+        format_name = format_name_by_id.get(format_id)
+        category_name = category_name_by_id.get(category_id) if category_id else None
+        key = (location_name, _normalize_name(category_name), format_name)
 
         for timeframe_id, raw_value in cell_pattern.findall(row_html):
             year_label = year_label_by_timeframe_id.get(timeframe_id)
             if year_label is None:
                 continue
 
-            # skip non-numeric placeholders like 'LNE'/'NA' - the total is then a slight
-            # undercount when those appear, which is fine for a rough sanity check
+            # skip non-numeric placeholders like 'LNE'/'NA' - that period is just left out of
+            # the series, which is fine for a rough sanity check against the remaining periods
             try:
-                value = float(raw_value.strip().replace(',', ''))
+                value = float(raw_value.strip().replace(',', '').replace('%', ''))
             except ValueError:
                 continue
+            if format_name == 'Percent':
+                value /= 100  # the site displays percent as e.g. "12.6%", files store 0.126
 
-            year_totals = totals_by_location.setdefault(location_name, {})
-            year_totals[year_label] = year_totals.get(year_label, 0) + value
+            series_by_key.setdefault(key, {})[year_label] = value
 
-    return totals_by_location
+    return series_by_key
 
 
-#### fetch the most recent `num_years` periods of data from the indicator's live page, for Texas
-#### (statewide) plus whichever counties are named in `county_names`. A "period" is normally a
-#### single year ("2023") but for some indicators is a multi-year ACS range ("2018 - 2022").
-#### returns {location_name: {year_label: total}}, e.g. {'Texas': {'2019': 50183, ...}, 'Bexar': {...}}
+#### fetch, for Texas (statewide) plus whichever counties are named in `county_names`, one
+#### series per (location, category, data format) covering the most recent `num_years` periods
+#### on the indicator's live page. A "period" is normally a single year ("2023") but for some
+#### indicators is a multi-year ACS range ("2018 - 2022").
+#### returns {(location, normalized_category_or_None, data_format): {year_label: value}}, e.g.
+#### {('Texas', 'white', 'Number'): {'2019': 14122, ...}, ('Texas', None, 'Percent'): {...}, ...}
 #### raises ReferenceDataUnavailable if the site can't be reached or its layout has changed -
 #### callers should catch this and just skip the check, since it's an external site we don't control
-def fetch_recent_totals(page_url, county_names, num_years=5):
+def fetch_recent_series(page_url, county_names, num_years=5):
     config = _get_indicator_page_config(page_url)
-
-    number_format_id = config['format_id_by_label'].get('Number')
-    if number_format_id is None:
-        raise ReferenceDataUnavailable(
-            "This indicator doesn't report a 'Number' format on the site - only 'Number' values "
-            "are additive across breakdown categories, so totals can't be checked this way."
-        )
 
     recent_periods = sorted(
         config['year_label_by_timeframe_id'].items(),
@@ -178,23 +190,27 @@ def fetch_recent_totals(page_url, county_names, num_years=5):
     )[:num_years]
     recent_timeframe_ids = [timeframe_id for timeframe_id, year_label in recent_periods]
 
+    format_ids = list(config['format_name_by_id'].keys())
+    category_ids = list(config['category_name_by_id'].keys())
+
+    def parse(table_html, location_name_by_id):
+        return _parse_series_by_key(
+            table_html, config['year_label_by_timeframe_id'], config['category_name_by_id'],
+            config['format_name_by_id'], location_name_by_id,
+        )
+
     texas_html = _fetch_data_table_html(
         page_url, config['indicator_id'], [TEXAS_LOCATION_ID], '2',
-        recent_timeframe_ids, number_format_id, config['category_ids'],
+        recent_timeframe_ids, format_ids, category_ids,
     )
-    totals = _sum_totals_by_location_and_year(
-        texas_html, config['year_label_by_timeframe_id'], number_format_id, {TEXAS_LOCATION_ID: 'Texas'},
-    )
+    series_by_key = parse(texas_html, {TEXAS_LOCATION_ID: 'Texas'})
 
     if county_names:
         county_id_by_name = {name: str(locations_dict[name]) for name in county_names}
         county_html = _fetch_data_table_html(
             page_url, config['indicator_id'], list(county_id_by_name.values()), '5',
-            recent_timeframe_ids, number_format_id, config['category_ids'],
+            recent_timeframe_ids, format_ids, category_ids,
         )
-        totals.update(_sum_totals_by_location_and_year(
-            county_html, config['year_label_by_timeframe_id'], number_format_id,
-            {loc_id: name for name, loc_id in county_id_by_name.items()},
-        ))
+        series_by_key.update(parse(county_html, {loc_id: name for name, loc_id in county_id_by_name.items()}))
 
-    return totals
+    return series_by_key

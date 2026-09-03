@@ -20,18 +20,22 @@ import pandas as pd
 from locations_dict import locations_dict
 from valid_data_formats import valid_data_formats
 from reference_data_dict import reference_data_dict
-from site_reference_data import fetch_recent_totals, ReferenceDataUnavailable
+from site_reference_data import fetch_recent_series, ReferenceDataUnavailable
 
 REQUIRED_COLUMNS = ['Location', 'LocationId', 'DataFormat', 'Data', 'TimeFrame']
 
 MIN_VALID_YEAR = 2010 # 2010 is arbitrary - move it earlier if we ever decide to upload more historical data
 MAX_VALID_YEAR = date.today().year
 
-# counties checked against the live site (in addition to Texas) for the trend sanity check below
-REFERENCE_CHECK_COUNTIES = ['Bexar', 'Travis']
+# locations checked against the live site for the trend sanity check below
+REFERENCE_CHECK_LOCATIONS = {'Texas', 'Bexar', 'Travis'}
+REFERENCE_CHECK_COUNTIES = ['Bexar', 'Travis'] # the non-Texas subset, passed to fetch_recent_series
 
-# how far a total can drift from the reference average before it gets flagged - 0.25 is
-# arbitrary, loosen/tighten it if it's too noisy or missing real mistakes
+# how far a value can drift from the site's recent average before it gets flagged - 0.25 is
+# arbitrary, loosen/tighten it if it's too noisy or missing real mistakes. Applies the same way
+# to 'Number' and 'Percent' values (e.g. a rate moving from ~13% to 29% is a ~123% relative
+# swing, well past this threshold) - though note a relative threshold is twitchy on very small
+# percentages, where a 1-point move can look like a large relative swing
 REFERENCE_DEVIATION_THRESHOLD = 0.25
 
 
@@ -172,10 +176,26 @@ def get_indicator_key(file_path):
     return f'{segments[0]}_{segments[1]}'
 
 
-#### data check: compare this file's Texas/Bexar/Travis totals against the last several years
-#### of data pulled live from the indicator's site page (see reference_data_dict.py). This can't
-#### catch every mistake, but a total that's way off from recent history often means a
-#### units/location/decimal mistake worth double-checking before uploading.
+#### the one breakdown column in a file, if any (e.g. 'RaceEthnicity', 'Age group') - everything
+#### that isn't a required column or 'LocationType' (which is location metadata, not a breakdown)
+#### returns None if there's no such column, so callers treat every row as having no category
+def get_breakdown_column(df):
+    breakdown_columns = [col for col in df.columns if col not in REQUIRED_COLUMNS and col != 'LocationType']
+    return breakdown_columns[0] if len(breakdown_columns) == 1 else None
+
+
+#### format a Data value for display the same way the file/site would show it
+def format_data_value(value, data_format):
+    return f"{value:.1%}" if data_format == 'Percent' else f"{value:,.4g}"
+
+
+#### data check: compare each of this file's Texas/Bexar/Travis data points against the last
+#### several periods of the *exact same* location + category + data format pulled live from the
+#### indicator's site page (see reference_data_dict.py) - no aggregation across categories or
+#### data formats, so this also catches a 'Percent' value that's wrong because the analyst used
+#### the wrong denominator even when the matching 'Number' value is correct.
+#### This can't catch every mistake, but a value that's way off from recent history is often a
+#### units/location/denominator mistake worth double-checking before uploading.
 #### does nothing if the indicator isn't in reference_data_dict.py yet, or if the live site can't
 #### be reached/parsed (this shouldn't block validation just because a website hiccuped)
 def validate_against_reference_data(df, indicator_key):
@@ -186,38 +206,42 @@ def validate_against_reference_data(df, indicator_key):
         return warnings
 
     try:
-        reference_by_location = fetch_recent_totals(page_url, REFERENCE_CHECK_COUNTIES)
+        series_by_key = fetch_recent_series(page_url, REFERENCE_CHECK_COUNTIES)
     except ReferenceDataUnavailable as e:
         warnings.append(f"Could not run the site trend check for '{indicator_key}' ({e}) - skipping it.")
         return warnings
 
-    for location, reference_years in reference_by_location.items():
-        if not reference_years:
+    breakdown_column = get_breakdown_column(df)
+
+    for index, row in df.iterrows():
+        if row['Location'] not in REFERENCE_CHECK_LOCATIONS or not isinstance(row['Data'], (int, float)):
             continue
 
-        # only 'Number' values are additive across breakdown categories (e.g. RaceEthnicity) -
-        # percentages/rates of subgroups don't sum to the group percentage/rate
-        location_rows = df[(df['Location'] == location) & (df['DataFormat'] == 'Number')]
+        category = row[breakdown_column] if breakdown_column else None
+        normalized_category = category.strip().casefold() if isinstance(category, str) else None
 
-        for timeframe, group in location_rows.groupby('TimeFrame'):
-            numeric_values = [v for v in group['Data'] if isinstance(v, (int, float))]
-            if not numeric_values:
-                continue
-            total = sum(numeric_values)
+        reference_periods = series_by_key.get((row['Location'], normalized_category, row['DataFormat']))
+        if not reference_periods:
+            continue
 
-            reference_average = sum(reference_years.values()) / len(reference_years)
-            if reference_average == 0:
-                continue
+        reference_average = sum(reference_periods.values()) / len(reference_periods)
+        if reference_average == 0:
+            continue
 
-            percent_diff = abs(total - reference_average) / reference_average
-            if percent_diff > REFERENCE_DEVIATION_THRESHOLD:
-                direction = "higher" if total > reference_average else "lower"
-                warnings.append(
-                    f"POSSIBLE DATA ISSUE: '{location}' total for {timeframe} is {total:,.0f}, which is "
-                    f"{percent_diff:.0%} {direction} than the {len(reference_years)}-year average on the "
-                    f"site ({reference_average:,.0f}). Recent years on site: {reference_years}. Double "
-                    f"check this isn't a units/location/decimal mistake before uploading."
-                )
+        percent_diff = abs(row['Data'] - reference_average) / reference_average
+        if percent_diff > REFERENCE_DEVIATION_THRESHOLD:
+            direction = "higher" if row['Data'] > reference_average else "lower"
+            category_note = f" ({category})" if category else ""
+            formatted_periods = {
+                period: format_data_value(value, row['DataFormat']) for period, value in reference_periods.items()
+            }
+            warnings.append(
+                f"POSSIBLE DATA ISSUE: '{row['Location']}'{category_note} {row['DataFormat']} value for "
+                f"{row['TimeFrame']} (row {index + 2}) is {format_data_value(row['Data'], row['DataFormat'])}, "
+                f"which is {percent_diff:.0%} {direction} than the {len(reference_periods)}-period average on "
+                f"the site ({format_data_value(reference_average, row['DataFormat'])}). Recent periods on site: "
+                f"{formatted_periods}. Double check this isn't a units/location/denominator mistake before uploading."
+            )
 
     return warnings
 
@@ -288,7 +312,7 @@ def validate_excel_data(file_path):
             if not is_valid_timeframe(row['TimeFrame']):
                 errors.append(f"Invalid value '{row['TimeFrame']}' in 'TimeFrame' column in row {index + 2}")
 
-        # test: Texas/Bexar/Travis totals aren't way off from the last several years on the live site
+        # test: Texas/Bexar/Travis values aren't way off from the last several periods on the live site
         indicator_key = get_indicator_key(file_path)
         if indicator_key is not None:
             errors.extend(validate_against_reference_data(df, indicator_key))

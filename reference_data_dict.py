@@ -1,8 +1,9 @@
 #### Maps each indicator to its page on the live KIDS COUNT Data Center site
 #### (https://datacenter.aecf.org). Used by site_reference_data.py as a data check before
-#### uploading new data: it fetches the last 5 years straight from the site and compares this
-#### file's totals against them, flagging anything way off (a common sign of a units/location/
-#### decimal mistake) so it's worth double checking before uploading.
+#### uploading new data: it fetches the last 5 periods straight from the site - for every
+#### location/category/data-format combination the file has, Number and Percent both - and
+#### flags any value that's way off from its own history (a common sign of a units/location/
+#### denominator mistake) so it's worth double checking before uploading.
 ####
 #### HOW TO FILL THIS OUT for a new indicator:
 #### 1. Get the indicator's key: it's the "<number>_<Name>" part of the cleaned file name, e.g.
