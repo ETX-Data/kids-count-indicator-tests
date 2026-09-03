@@ -10,12 +10,11 @@
 ####    "CLEANED_3.7_PretermBirths_2023_RaceEthnicity.xlsx" -> key is "3.7_PretermBirths".
 #### 2. Go to the indicator's page on datacenter.aecf.org for Texas (statewide) - any view/years
 ####    selected is fine, the URL just needs to point at the right indicator page.
-#### 3. Add an entry below: indicator key -> that page's URL. That's it - the numbers themselves
-####    are pulled live each time the test runs, nothing to type in by hand.
+#### 3. Add an entry below: indicator key -> that page's URL.
 ####
-#### It's expected that this dictionary starts out mostly empty and gets filled in
-#### indicator-by-indicator as each one gets processed - if an indicator isn't listed here yet,
-#### the reference-data check just skips it.
+#### It's your choice if you want to fill this out as you go or manually eyeball check indicators on the website each time
+#### before you do an upload. Since we expect you to be checking either way, I'd recommend filling this out as you go 
+#### to make future updates less time consuming :) 
 
 reference_data_dict = {
     "1.2_ChildPopulation": "https://datacenter.aecf.org/data/tables/11124-child-pop-by-race-and-ethnicity-asian-disaggregated?loc=45&loct=2",
