@@ -1,3 +1,16 @@
+# Checks every .xlsx file in the data/ folder for common formatting mistakes
+# (bad locations, bad data values/formats, missing columns, etc.) before it
+# gets uploaded to the Kids Count Data Center site.
+#
+# NOTE: passing this script is not a substitute for actually previewing and
+# eyeballing the data post-upload - always double check it looks correct before publishing.
+
+# NOTE: always download the site's full current indicator data before uploading
+# anything. An upload completely overwrites that indicator's existing data on the
+# site (there's no way to edit/patch it afterward), so if the uploaded file turns
+# out to have errors, the only fix is re-uploading a corrected file - and without
+# a backup of the full data, whatever historical data wasn't in it is gone.
+
 import os
 import re
 import sys
@@ -6,15 +19,27 @@ import pandas as pd
 
 from locations_dict import locations_dict
 from valid_data_formats import valid_data_formats
+from reference_data_dict import reference_data_dict
+from site_reference_data import fetch_recent_totals, ReferenceDataUnavailable
 
 REQUIRED_COLUMNS = ['Location', 'LocationId', 'DataFormat', 'Data', 'TimeFrame']
 
 MIN_VALID_YEAR = 2010 # 2010 is arbitrary - move it earlier if we ever decide to upload more historical data
 MAX_VALID_YEAR = date.today().year
 
+# counties checked against the live site (in addition to Texas) for the trend sanity check below
+REFERENCE_CHECK_COUNTIES = ['Bexar', 'Travis']
 
-#### 'TimeFrame' is most commonly a single year (e.g. 2026), but some education
-#### indicators report a school year range instead (e.g. '2017 - 2018').
+# how far a total can drift from the reference average before it gets flagged - 0.25 is
+# arbitrary, loosen/tighten it if it's too noisy or missing real mistakes
+REFERENCE_DEVIATION_THRESHOLD = 0.25
+
+
+#### 'TimeFrame' is most commonly a single year (e.g. 2026), but some indicators report a range
+#### instead - either a school year (e.g. '2017 - 2018') or a multi-year ACS estimate (e.g.
+#### '2018 - 2022'), so any short, forward-moving range within the valid year bounds is accepted.
+MAX_VALID_TIMEFRAME_RANGE_SPAN = 5 # covers school-year ranges (span 1) through 5-year ACS estimates (span 4)
+
 def is_valid_timeframe(value):
     if isinstance(value, bool):
         return False
@@ -28,12 +53,46 @@ def is_valid_timeframe(value):
         if re.fullmatch(r'\d{4}', text):
             return MIN_VALID_YEAR <= int(text) <= MAX_VALID_YEAR
 
-        school_year_match = re.fullmatch(r'(\d{4})\s*-\s*(\d{4})', text)
-        if school_year_match:
-            start_year, end_year = int(school_year_match.group(1)), int(school_year_match.group(2))
-            return end_year == start_year + 1 and MIN_VALID_YEAR <= start_year <= MAX_VALID_YEAR
+        year_range_match = re.fullmatch(r'(\d{4})\s*-\s*(\d{4})', text)
+        if year_range_match:
+            start_year, end_year = int(year_range_match.group(1)), int(year_range_match.group(2))
+            return (
+                1 <= end_year - start_year <= MAX_VALID_TIMEFRAME_RANGE_SPAN
+                and MIN_VALID_YEAR <= start_year
+                and end_year <= MAX_VALID_YEAR
+            )
 
     return False
+
+
+#### 'LocationType' isn't a breakdown like RaceEthnicity/Age group - it's derived 1-to-1 from
+#### Location, and since there's exactly 1 state-level location (Texas) among all the locations
+#### in locations_dict, its two categories are legitimately uneven: 'County' should occur once
+#### per county for every 1 occurrence of 'State', not the same number of times as 'State'.
+STATE_LOCATION_NAMES = {'Texas'}
+
+def validate_location_type_column(raw_values):
+    errors = []
+    num_counties = len(locations_dict) - len(STATE_LOCATION_NAMES)
+
+    counts_by_category = pd.Series(raw_values).value_counts()
+
+    unexpected_categories = set(counts_by_category.index) - {'County', 'State'}
+    if unexpected_categories:
+        errors.append(f"Unexpected value(s) in 'LocationType' column: {sorted(unexpected_categories)} (expected only 'County' or 'State')")
+        return errors
+
+    county_count = int(counts_by_category.get('County', 0))
+    state_count = int(counts_by_category.get('State', 0))
+
+    if state_count == 0 or county_count != num_counties * state_count:
+        errors.append(
+            f"'LocationType' column has {county_count} 'County' row(s) and {state_count} 'State' row(s) - "
+            f"expected 'County' to occur exactly {num_counties} times for every 1 occurrence of 'State' "
+            f"(e.g. {num_counties}/1, {num_counties * 2}/2, ...)."
+        )
+
+    return errors
 
 
 #### some indicators include an extra breakdown column (e.g. RaceEthnicity, Sex, AgeGroup) that other indicators don't have
@@ -67,6 +126,10 @@ def validate_optional_categorical_columns(df):
                     f"category but are spelled/formatted differently."
                 )
 
+        if col == 'LocationType':
+            errors.extend(validate_location_type_column(raw_values))
+            continue
+
         # test: every category occurs the same number of times, and that count is a
         # multiple of the number of locations ({num_locations}, {num_locations*2}, ...)
         counts_by_category = pd.Series(raw_values).value_counts()
@@ -90,6 +153,75 @@ def validate_optional_categorical_columns(df):
     return errors
 
 
+#### pull the "<number>_<Name>" indicator key out of a cleaned file name - it's always the first
+#### two underscore-separated segments after "CLEANED_", regardless of what comes after (a year,
+#### a breakdown column, both, in either order, or a Windows re-download suffix like " (1)"), e.g.
+#### "CLEANED_3.7_PretermBirths_2023_RaceEthnicity.xlsx" -> "3.7_PretermBirths"
+#### "CLEANED_1.2_ChildPopulation_RaceEthnicity_AsianDisaggregated_2023.xlsx" -> "1.2_ChildPopulation"
+#### this key is what's looked up in reference_data_dict.py - returns None if the file name
+#### doesn't even have a "<number>_<Name>" prefix (the reference-data check is just skipped then)
+def get_indicator_key(file_path):
+    file_name = os.path.splitext(os.path.basename(file_path))[0]
+    segments = file_name.split('_')
+    if segments and segments[0].upper() == 'CLEANED':
+        segments = segments[1:]
+
+    if len(segments) < 2 or not re.fullmatch(r'\d+(\.\d+)?', segments[0]):
+        return None
+
+    return f'{segments[0]}_{segments[1]}'
+
+
+#### data check: compare this file's Texas/Bexar/Travis totals against the last several years
+#### of data pulled live from the indicator's site page (see reference_data_dict.py). This can't
+#### catch every mistake, but a total that's way off from recent history often means a
+#### units/location/decimal mistake worth double-checking before uploading.
+#### does nothing if the indicator isn't in reference_data_dict.py yet, or if the live site can't
+#### be reached/parsed (this shouldn't block validation just because a website hiccuped)
+def validate_against_reference_data(df, indicator_key):
+    warnings = []
+
+    page_url = reference_data_dict.get(indicator_key)
+    if page_url is None:
+        return warnings
+
+    try:
+        reference_by_location = fetch_recent_totals(page_url, REFERENCE_CHECK_COUNTIES)
+    except ReferenceDataUnavailable as e:
+        warnings.append(f"Could not run the site trend check for '{indicator_key}' ({e}) - skipping it.")
+        return warnings
+
+    for location, reference_years in reference_by_location.items():
+        if not reference_years:
+            continue
+
+        # only 'Number' values are additive across breakdown categories (e.g. RaceEthnicity) -
+        # percentages/rates of subgroups don't sum to the group percentage/rate
+        location_rows = df[(df['Location'] == location) & (df['DataFormat'] == 'Number')]
+
+        for timeframe, group in location_rows.groupby('TimeFrame'):
+            numeric_values = [v for v in group['Data'] if isinstance(v, (int, float))]
+            if not numeric_values:
+                continue
+            total = sum(numeric_values)
+
+            reference_average = sum(reference_years.values()) / len(reference_years)
+            if reference_average == 0:
+                continue
+
+            percent_diff = abs(total - reference_average) / reference_average
+            if percent_diff > REFERENCE_DEVIATION_THRESHOLD:
+                direction = "higher" if total > reference_average else "lower"
+                warnings.append(
+                    f"POSSIBLE DATA ISSUE: '{location}' total for {timeframe} is {total:,.0f}, which is "
+                    f"{percent_diff:.0%} {direction} than the {len(reference_years)}-year average on the "
+                    f"site ({reference_average:,.0f}). Recent years on site: {reference_years}. Double "
+                    f"check this isn't a units/location/decimal mistake before uploading."
+                )
+
+    return warnings
+
+
 #### validate the data inside an excel file against the required rules
 def validate_excel_data(file_path):
     errors = []
@@ -102,6 +234,10 @@ def validate_excel_data(file_path):
         for col in REQUIRED_COLUMNS:
             if(col not in df.columns):
                 errors.append(f"Missing column header {col}")
+
+        # can't run column/row-level checks below if a required column is missing
+        if errors:
+            return errors
 
         errors.extend(validate_optional_categorical_columns(df))
 
@@ -120,11 +256,17 @@ def validate_excel_data(file_path):
             valid_types = (float, int)
             valid_values = ['NA', 'LNE']
 
-            is_blank = isinstance(row['Data'], str) and row['Data'].strip() == ''
+            # a blank cell shows up as an empty string, but a cell holding an unresolved Excel
+            # formula error (e.g. '#DIV/0!') reads as NaN instead - both count as blank here
+            is_blank = (isinstance(row['Data'], str) and row['Data'].strip() == '') or pd.isna(row['Data'])
 
             # test: 'Data' is not left blank
             if is_blank:
-                errors.append(f"Blank/missing value in 'Data' column in row {index + 2} - use 'NA' or 'LNE' instead of leaving it empty.")
+                errors.append(
+                    f"Blank/missing value in 'Data' column in row {index + 2} - use 'NA' or 'LNE' instead of "
+                    f"leaving it empty. (If this cell isn't actually empty, it may contain an unresolved Excel "
+                    f"formula error like '#DIV/0!' - open the file and check.)"
+                )
             else:
                 # test: percentage values are between 0.00 and 1.00
                 if row['DataFormat'] == 'Percent' and row['Data'] not in valid_values:
@@ -145,6 +287,11 @@ def validate_excel_data(file_path):
             # test: 'TimeFrame' is a plausible year (e.g. 2026) or school-year range (e.g. '2017 - 2018')
             if not is_valid_timeframe(row['TimeFrame']):
                 errors.append(f"Invalid value '{row['TimeFrame']}' in 'TimeFrame' column in row {index + 2}")
+
+        # test: Texas/Bexar/Travis totals aren't way off from the last several years on the live site
+        indicator_key = get_indicator_key(file_path)
+        if indicator_key is not None:
+            errors.extend(validate_against_reference_data(df, indicator_key))
 
     except Exception as e:
         errors.append(f"Error processing Excel file in \"{file_path}\": {e}")
