@@ -8,7 +8,7 @@ To get this cloned down and to use it locally, just follow these instructions
 1. Clone the repo down locally. Open up a terminal, change directory to wherever you would like the repo folder downloaded to, then use the following command:
 
 ```
-git clone https://github.com/kaitlan-wong/kids-count-indicator-tests
+git clone https://github.com/ETX-Data/kids-count-indicator-tests
 ```
 
 2. Then you need to go into the folder and run pip install to get all the necessary packages
