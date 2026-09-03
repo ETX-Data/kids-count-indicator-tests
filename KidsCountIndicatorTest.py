@@ -28,7 +28,7 @@ MIN_VALID_YEAR = 2010 # 2010 is arbitrary - move it earlier if we ever decide to
 MAX_VALID_YEAR = date.today().year
 
 # Bexar and Travis are checked (along with Texas) because they're populous enough that their
-# year-to-year numbers stay fairly stable - small counties can swing widely from natural
+# year to year numbers stay fairly stable - small counties can swing widely from natural
 # randomness alone, which would trigger false positives here.
 # can edit to add additional counties / change which counties you're looking at
 REFERENCE_CHECK_LOCATIONS = {'Texas', 'Bexar', 'Travis'}
@@ -72,7 +72,7 @@ def is_valid_timeframe(value):
     return False
 
 
-#### 'LocationType' isn't a breakdown like RaceEthnicity/Age group - it's derived 1-to-1 from
+#### 'LocationType' isn't a breakdown like RaceEthnicity/Age group - it's derived from
 #### Location, and since there's exactly 1 state-level location (Texas) among all the locations
 #### in locations_dict, its two categories are legitimately uneven: 'County' should occur once
 #### per county for every 1 occurrence of 'State', not the same number of times as 'State'.
@@ -194,9 +194,7 @@ def format_data_value(value, data_format):
 
 #### data check: compare each of this file's Texas/Bexar/Travis data points against the last
 #### several periods of the *exact same* location + category + data format pulled live from the
-#### indicator's site page (see reference_data_dict.py) - no aggregation across categories or
-#### data formats, so this also catches a 'Percent' value that's wrong because the analyst used
-#### the wrong denominator even when the matching 'Number' value is correct.
+#### indicator's site page (see reference_data_dict.py)
 #### This can't catch every mistake, but a value that's way off from recent history is often a
 #### units/location/denominator mistake worth double-checking before uploading.
 #### does nothing if the indicator isn't in reference_data_dict.py yet, or if the live site can't
@@ -284,7 +282,7 @@ def validate_excel_data(file_path):
             valid_values = ['NA', 'LNE']
 
             # a blank cell shows up as an empty string, but a cell holding an unresolved Excel
-            # formula error (e.g. '#DIV/0!') reads as NaN instead - both count as blank here
+            # formula error (e.g. '#DIV/0!') reads as NaN instead (both count as blank here)
             is_blank = (isinstance(row['Data'], str) and row['Data'].strip() == '') or pd.isna(row['Data'])
 
             # test: 'Data' is not left blank
@@ -311,7 +309,7 @@ def validate_excel_data(file_path):
             if row['DataFormat'] not in valid_data_formats:
                 errors.append(f"Invalid data format '{row['DataFormat']}' in row {index + 2}")
 
-            # test: 'TimeFrame' is a plausible year (e.g. 2026) or school-year range (e.g. '2017 - 2018')
+            # test: 'TimeFrame' is a plausible year (e.g. 2026) or school year range (e.g. '2017 - 2018')
             if not is_valid_timeframe(row['TimeFrame']):
                 errors.append(f"Invalid value '{row['TimeFrame']}' in 'TimeFrame' column in row {index + 2}")
 
